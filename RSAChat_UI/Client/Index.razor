@@ -1,0 +1,106 @@
+﻿@page "/"
+@using Microsoft.AspNetCore.SignalR.Client
+@using System.Security.Cryptography
+@using System.Text
+@inject NavigationManager NavigationManager
+
+@if (username == null)
+{
+    <div class="form-group">
+        <label>
+            User:
+            <input @bind="_userInput" />
+        </label>
+        <button @onclick="RegisterUser"></button>
+    </div>
+}
+else
+{
+    <div class="form-group">
+        <label>
+            Message:
+            <input @bind="_messageInput" size="50" />
+        </label>
+    </div>
+    <button @onclick="Send" disabled="@(!IsConnected)">Send</button>
+
+    <hr>
+
+    <ul id="messagesList">
+        @foreach (var message in _messages)
+        {
+            <li>@message</li>
+        }
+    </ul>
+}
+
+@code {
+    private HubConnection _hubConnection;
+    private List<string> _messages = new List<string>();
+    private Dictionary<string, string> participantsKeys;
+    private string username;
+    private string _userInput;
+    private string _messageInput;
+    private RSACryptoServiceProvider RSA;
+    private string publicKey;
+    private string privateKey;
+    private RSAParameters privateParams;
+    private RSAParameters publicParams;
+
+    protected override async Task OnInitializedAsync()
+    {
+        _hubConnection = new HubConnectionBuilder()
+            .WithUrl(NavigationManager.ToAbsoluteUri("/chatHub"))
+            .Build();
+
+        _hubConnection.On<string, byte[], bool>("ReceiveMessage", (user, message, isPM) =>
+        {
+            var text = isPM ? RSAAlgorithm.RSADecrypt(message, privateKey) : message;
+
+            var encodedMsg = $"{user}: {Encoding.Unicode.GetString(text)}";
+            _messages.Add(encodedMsg);
+            StateHasChanged();
+        });
+
+        _hubConnection.On<Dictionary<string, string>>("GetParticipants", (participants) =>
+        {
+            participantsKeys = participants;
+        });
+
+        _hubConnection.On<string, string>("NewConnection", (username, key) => participantsKeys.Add(username, key));
+
+        await _hubConnection.StartAsync();
+    }
+
+    Task Send()
+    {
+        var message = _messageInput;
+        var recipient = message.StartsWith("/pm ") ? new String(message.Skip("/pm ".Length).TakeWhile(i => i != ' ').ToArray()) : null;
+        var contents = Encoding.Unicode.GetBytes(message);
+
+        var finalCipherText = recipient == null ? contents : RSAAlgorithm.RSAEncrypt(contents, participantsKeys[recipient]);
+
+        return _hubConnection.SendAsync("SendMessage", recipient, finalCipherText);
+    }
+
+    Task RegisterUser()
+    {
+        Console.WriteLine(participantsKeys == null);
+
+        if (participantsKeys.ContainsKey(_userInput))
+            return Task.CompletedTask;
+
+        RSA = new RSACryptoServiceProvider();
+        publicKey = RSA.ToXmlString(false);
+        privateKey = RSA.ToXmlString(true);
+        privateParams = RSA.ExportParameters(true);
+        publicParams = RSA.ExportParameters(false);
+
+        username = _userInput;
+
+        return _hubConnection.SendAsync("RegisterUser", username, publicKey);
+    }
+
+    public bool IsConnected =>
+        _hubConnection.State == HubConnectionState.Connected;
+}
